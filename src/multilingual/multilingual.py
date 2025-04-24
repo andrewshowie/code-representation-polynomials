@@ -13,6 +13,8 @@ import json
 import numpy as np
 from tree_sitter import Language, Parser
 from collections import defaultdict, Counter
+import ot
+import matplotlib.pyplot as plt
 
 # Part 1: Tree-sitter Integration for Multi-language Parsing
 # ---------------------------------------------------------
@@ -31,32 +33,59 @@ class TreeSitterExtractor:
     
     def _initialize_languages(self):
         """Initialize parsers for supported languages."""
-        # Will build or load tree-sitter language libraries
-        # Placeholder to be updated later
+        # Define base directory for language repositories
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        build_dir = os.path.join(base_dir, '..', '..', 'build')
+        
+        # Ensure build directory exists
+        os.makedirs(build_dir, exist_ok=True)
+        
+        # Define language repositories paths
+        # In production, you should clone these repositories first
+        language_repos = {
+            'python': os.path.join(base_dir, '..', '..', 'tree-sitter-python'),
+            'javascript': os.path.join(base_dir, '..', '..', 'tree-sitter-javascript'),
+            'csharp': os.path.join(base_dir, '..', '..', 'tree-sitter-c-sharp'),
+            'java': os.path.join(base_dir, '..', '..', 'tree-sitter-java'),
+            'cpp': os.path.join(base_dir, '..', '..', 'tree-sitter-cpp')
+        }
+        
+        # Path to the compiled library
+        lib_path = os.path.join(build_dir, 'languages.so')
+        
         try:
-            # Python example - in practice, we'd load more languages
-            Language.build_library(
-                'build/languages.so',
-                [
-                    './tree-sitter-python',
-                    './tree-sitter-javascript',
-                    './tree-sitter-csharp',
-                    './tree-sitter-java',
-                    './tree-sitter-cpp'
-                ]
-            )
+            # Check if repositories exist, if not, try to use pre-built library
+            repos_exist = all(os.path.exists(path) for path in language_repos.values())
             
-            self.languages['python'] = Language('build/languages.so', 'python')
-            self.languages['javascript'] = Language('build/languages.so', 'javascript')
-            self.languages['csharp'] = Language('build/languages.so', 'c_sharp')
-            self.languages['java'] = Language('build/languages.so', 'java')
-            self.languages['cpp'] = Language('build/languages.so', 'cpp')
+            if repos_exist:
+                # Build language library from repositories
+                Language.build_library(
+                    lib_path,
+                    list(language_repos.values())
+                )
+            elif os.path.exists(lib_path):
+                # If lib already exists but repos don't, just load existing
+                pass
+            else:
+                # If neither repos nor lib exist, use fallback
+                print("Language repositories not found and no pre-built library exists.")
+                print("Using fallback parsing mode.")
+                return
+            
+            # Load languages from the built library
+            self.languages['python'] = Language(lib_path, 'python')
+            self.languages['javascript'] = Language(lib_path, 'javascript')
+            self.languages['csharp'] = Language(lib_path, 'c_sharp')
+            self.languages['java'] = Language(lib_path, 'java')
+            self.languages['cpp'] = Language(lib_path, 'cpp')
             
             # Create parsers for each language
             for lang, language in self.languages.items():
                 parser = Parser()
                 parser.set_language(language)
                 self.parsers[lang] = parser
+                
+            print(f"Successfully initialized parsers for {', '.join(self.languages.keys())}")
                 
         except Exception as e:
             print(f"Language initialization error: {e}")
@@ -266,19 +295,183 @@ class CrossLanguageComparator:
         coef1, mapping1 = self.compute_polynomial_coefficients(deps1, all_types)
         coef2, mapping2 = self.compute_polynomial_coefficients(deps2, all_types)
         
-        # Calculate similarity using various metrics
-        # Will add OT implementation here
-        # Placeholder uses cosine similarity
-        similarity = np.dot(coef1, coef2) / (np.linalg.norm(coef1) * np.linalg.norm(coef2))
+        # Calculate similarity using optimal transport
+        # Prepare for OT calculation
+        # Normalize coefficient vectors to create proper distributions
+        p = coef1 / (np.sum(coef1) + 1e-10)  # Adding epsilon to avoid division by zero
+        q = coef2 / (np.sum(coef2) + 1e-10)
+        
+        # Create cost matrix based on variable positions in the polynomial
+        n = len(all_types)
+        M = np.abs(np.subtract.outer(np.arange(n), np.arange(n)))
+        M /= M.max()  # Normalize cost matrix
+        
+        # Compute OT distance using Sinkhorn algorithm
+        epsilon = 0.1  # Regularization parameter
+        ot_distance = ot.sinkhorn2(p, q, M, epsilon)
+        
+        # Calculate similarity as inverse of distance
+        similarity = 1.0 / (1.0 + ot_distance)
         
         return {
             'coefficients1': coef1,
             'coefficients2': coef2,
             'mapping': mapping1,  # Same as mapping2 since using all_types for both
             'similarity': similarity,
+            'ot_distance': ot_distance,
             'node_count1': len(nodes1),
             'node_count2': len(nodes2),
         }
+    
+    def visualize_cross_language_dependencies(self, 
+                                         code1, lang1, 
+                                         code2, lang2,
+                                         title=None):
+        """
+        Visualize dependencies across different programming languages.
+        
+        Args:
+            code1: First code snippet
+            lang1: Language of first snippet
+            code2: Second code snippet
+            lang2: Language of second snippet
+            title: Optional title for the visualization
+            
+        Returns:
+            matplotlib.figure.Figure: Figure with dependency visualization
+        """
+        # Extract unified representations
+        deps1, types1, nodes1 = self.extract_unified_representation(code1, lang1)
+        deps2, types2, nodes2 = self.extract_unified_representation(code2, lang2)
+        
+        # Count dependency type occurrences
+        counts1 = Counter([dep_type for _, _, dep_type in deps1])
+        counts2 = Counter([dep_type for _, _, dep_type in deps2])
+        
+        # Combine all dependency types
+        all_types = sorted(types1.union(types2))
+        
+        # Create data for visualization
+        x = np.arange(len(all_types))
+        width = 0.35
+        
+        # Create counts aligned with all_types
+        values1 = [counts1.get(dep_type, 0) for dep_type in all_types]
+        values2 = [counts2.get(dep_type, 0) for dep_type in all_types]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Create bar chart
+        rects1 = ax.bar(x - width/2, values1, width, label=f'{lang1} ({len(nodes1)} nodes)')
+        rects2 = ax.bar(x + width/2, values2, width, label=f'{lang2} ({len(nodes2)} nodes)')
+        
+        # Customize chart
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title(f'Cross-language Dependency Comparison: {lang1} vs {lang2}')
+            
+        ax.set_ylabel('Frequency')
+        ax.set_xlabel('Dependency Type')
+        
+        # Truncate long dependency type names
+        truncate = lambda s: s[:20] + '...' if len(s) > 20 else s
+        ax.set_xticks(x)
+        ax.set_xticklabels([truncate(t) for t in all_types], rotation=45, ha='right')
+        
+        ax.legend()
+        
+        # Add value labels on bars
+        def add_labels(rects):
+            for rect in rects:
+                height = rect.get_height()
+                if height > 0:
+                    ax.annotate(f'{height}',
+                                xy=(rect.get_x() + rect.get_width()/2, height),
+                                xytext=(0, 3),
+                                textcoords="offset points",
+                                ha='center', va='bottom')
+        
+        add_labels(rects1)
+        add_labels(rects2)
+        
+        plt.tight_layout()
+        
+        return fig
+
+    def visualize_ot_plan(self, 
+                        code1, lang1, 
+                        code2, lang2, 
+                        title=None):
+        """
+        Visualize the optimal transport plan between code in different languages.
+        
+        Args:
+            code1: First code snippet
+            lang1: Language of first snippet
+            code2: Second code snippet
+            lang2: Language of second snippet
+            title: Optional title for the visualization
+            
+        Returns:
+            matplotlib.figure.Figure: Visualization of OT plan
+        """
+        # Extract unified representations
+        deps1, types1, nodes1 = self.extract_unified_representation(code1, lang1)
+        deps2, types2, nodes2 = self.extract_unified_representation(code2, lang2)
+        
+        # Combine all dependency types
+        all_types = sorted(types1.union(types2))
+        
+        # Compute polynomial coefficients
+        coef1, mapping1 = self.compute_polynomial_coefficients(deps1, all_types)
+        coef2, mapping2 = self.compute_polynomial_coefficients(deps2, all_types)
+        
+        # Normalize coefficient vectors to create proper distributions
+        p = coef1 / (np.sum(coef1) + 1e-10)
+        q = coef2 / (np.sum(coef2) + 1e-10)
+        
+        # Create cost matrix based on variable positions
+        n = len(all_types)
+        M = np.abs(np.subtract.outer(np.arange(n), np.arange(n)))
+        M /= M.max()  # Normalize cost matrix
+        
+        # Compute OT plan using Sinkhorn algorithm
+        epsilon = 0.1  # Regularization parameter
+        ot_distance, log = ot.sinkhorn2(p, q, M, epsilon, log=True)
+        ot_plan = log['pi']
+        
+        # Visualize the transport plan
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        # Plot transport plan as a heatmap
+        im = ax.imshow(ot_plan, cmap='viridis', aspect='auto')
+        fig.colorbar(im, ax=ax, label='Transport Weight')
+        
+        # Set labels
+        # Truncate long labels for readability
+        truncate = lambda s: s[:15] + '...' if len(s) > 15 else s
+        type_labels = [truncate(t) for t in all_types]
+        
+        # Set tick labels
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(type_labels, rotation=90, ha='right')
+        ax.set_yticklabels(type_labels)
+        
+        # Add title and labels
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title(f'Optimal Transport Plan: {lang1} to {lang2} (Distance: {ot_distance:.4f})')
+        
+        ax.set_xlabel(f'{lang2} Dependencies')
+        ax.set_ylabel(f'{lang1} Dependencies')
+        
+        plt.tight_layout()
+        
+        return fig, ot_distance
 
 # Part 4: Demonstration
 # ------------------
@@ -337,6 +530,20 @@ public int Factorial(int n)
     print(f"\nPython-JavaScript Similarity: {py_js_comparison['similarity']:.4f}")
     print(f"Python-C# Similarity: {py_cs_comparison['similarity']:.4f}")
     print(f"JavaScript-C# Similarity: {js_cs_comparison['similarity']:.4f}")
+    
+    # Create visualization
+    comparator.visualize_cross_language_dependencies(
+        python_code, 'python', 
+        javascript_code, 'javascript', 
+        title='Python vs JavaScript Factorial Function'
+    )
+    
+    # Create OT plan visualization
+    fig, distance = comparator.visualize_ot_plan(
+        python_code, 'python',
+        csharp_code, 'csharp',
+        title='Optimal Transport Plan Between Python and C# Implementation'
+    )
     
     return {
         'py_js': py_js_comparison,
