@@ -36,6 +36,8 @@ class CodeGenerationMetrics:
     ot_distance: float = 0.0
     ot_plan_entropy: float = 0.0
     ot_coverage: float = 0.0
+    flow_concentration: float = 0.0
+    structural_deformation: float = 0.0
     
     def to_dict(self) -> Dict[str, float]:
         """Convert metrics to dictionary."""
@@ -67,25 +69,54 @@ class CodeEvaluator:
     
     def compute_bleu(self, reference: str, generated: str) -> float:
         """
-        Compute BLEU score.
+        Compute BLEU score using NLTK for accuracy.
         
-        Note: This is a simplified BLEU implementation for demonstration.
-        In practice, use a library like NLTK or SacreBLEU.
+        Args:
+            reference: Reference code string
+            generated: Generated code string
+            
+        Returns:
+            float: BLEU score (0-1)
         """
-        # Tokenize
-        ref_tokens = reference.strip().split()
-        gen_tokens = generated.strip().split()
-        
-        # Count matches
-        matches = sum(1 for token in gen_tokens if token in ref_tokens)
-        
-        # Precision component (simplified)
-        precision = matches / len(gen_tokens) if gen_tokens else 0
-        
-        # Apply brevity penalty (simplified)
-        bp = min(1.0, np.exp(1 - len(ref_tokens) / len(gen_tokens))) if gen_tokens else 0
-        
-        return bp * precision
+        try:
+            from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+            
+            # Tokenize into words
+            ref_tokens = reference.strip().split()
+            gen_tokens = generated.strip().split()
+            
+            # Handle empty sequences
+            if not gen_tokens:
+                return 0.0
+            if not ref_tokens:
+                return 0.0
+            
+            # Use smoothing to handle edge cases (such as n-gram precision being 0)
+            smoothing = SmoothingFunction().method1
+            
+            # Calculate BLEU with equal weights for 1-4 grams
+            weights = (0.25, 0.25, 0.25, 0.25)
+            score = sentence_bleu([ref_tokens], gen_tokens, weights=weights, 
+                                 smoothing_function=smoothing)
+            
+            return score
+            
+        except ImportError:
+            # Fall back to simplified implementation if NLTK isn't available
+            # Tokenize
+            ref_tokens = reference.strip().split()
+            gen_tokens = generated.strip().split()
+            
+            # Count matches (1-gram)
+            matches = sum(1 for token in gen_tokens if token in ref_tokens)
+            
+            # Precision component
+            precision = matches / len(gen_tokens) if gen_tokens else 0
+            
+            # Apply brevity penalty
+            bp = min(1.0, np.exp(1 - len(ref_tokens) / max(len(gen_tokens), 1)))
+            
+            return bp * precision
     
     def compute_structural_metrics(self, 
                                   ref_dependencies: List[Tuple], 
@@ -130,7 +161,7 @@ class CodeEvaluator:
             gen_coefficients: Generated code polynomial coefficients
             
         Returns:
-            dict: OT distance, plan entropy, and coverage
+            dict: OT distance, plan entropy, coverage, and flow concentration
         """
         # Ensure equal length
         max_len = max(len(ref_coefficients), len(gen_coefficients))
@@ -157,12 +188,25 @@ class CodeEvaluator:
         
         # Calculate coverage (how much of reference is covered)
         coverage = np.sum(np.any(ot_plan > 0.01, axis=1))
-        coverage_ratio = coverage / len(ref_coefficients)
+        coverage_ratio = coverage / max(len(ref_coefficients), 1)
+        
+        # Calculate flow concentration (Gini coefficient of the OT plan)
+        # Flatten the OT plan and compute Gini coefficient
+        flat_plan = ot_plan.flatten()
+        sorted_plan = np.sort(flat_plan)
+        n = len(sorted_plan)
+        cumsum = np.cumsum(sorted_plan)
+        flow_concentration = (n + 1 - 2 * np.sum(cumsum) / (cumsum[-1] * n + 1e-10)) / max(n, 1)
+        
+        # Calculate structural deformation (scaled total transport cost)
+        deformation = ot_distance / (np.sum(p) * np.sum(q) + 1e-10)
         
         return {
             'ot_distance': ot_distance,
             'ot_plan_entropy': plan_entropy,
-            'ot_coverage': coverage_ratio
+            'ot_coverage': coverage_ratio,
+            'flow_concentration': flow_concentration,
+            'structural_deformation': deformation
         }
     
     def evaluate(self, 
@@ -216,10 +260,81 @@ class CodeEvaluator:
             dependency_f1=struct_metrics['f1'],
             ot_distance=ot_metrics['ot_distance'],
             ot_plan_entropy=ot_metrics['ot_plan_entropy'],
-            ot_coverage=ot_metrics['ot_coverage']
+            ot_coverage=ot_metrics['ot_coverage'],
+            flow_concentration=ot_metrics.get('flow_concentration', 0.0),
+            structural_deformation=ot_metrics.get('structural_deformation', 0.0)
         )
         
         return metrics
+    
+    def visualize_ot_plan(self, 
+                         ref_coefficients: np.ndarray, 
+                         gen_coefficients: np.ndarray,
+                         ref_dependencies: List[Tuple],
+                         gen_dependencies: List[Tuple]) -> plt.Figure:
+        """
+        Visualize the optimal transport plan between two code structures.
+        
+        Args:
+            ref_coefficients: Reference code polynomial coefficients
+            gen_coefficients: Generated code polynomial coefficients
+            ref_dependencies: Reference dependencies for labels
+            gen_dependencies: Generated dependencies for labels
+            
+        Returns:
+            matplotlib.figure.Figure: Figure with OT plan visualization
+        """
+        # Ensure equal length
+        max_len = max(len(ref_coefficients), len(gen_coefficients))
+        ref_coef = np.zeros(max_len)
+        gen_coef = np.zeros(max_len)
+        ref_coef[:len(ref_coefficients)] = ref_coefficients
+        gen_coef[:len(gen_coefficients)] = gen_coefficients
+        
+        # Normalize to create distributions
+        p = ref_coef / (np.sum(ref_coef) + 1e-10)
+        q = gen_coef / (np.sum(gen_coef) + 1e-10)
+        
+        # Compute cost matrix
+        M = np.abs(np.subtract.outer(np.arange(max_len), np.arange(max_len)))
+        M /= M.max()  # Normalize
+        
+        # Compute OT plan using Sinkhorn algorithm
+        epsilon = 0.1  # Regularization parameter
+        ot_distance, log = ot.sinkhorn2(p, q, M, epsilon, log=True)
+        ot_plan = log['pi']
+        
+        # Create figure for visualization
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Plot transport plan as a heatmap
+        im = ax.imshow(ot_plan, cmap='viridis', aspect='auto')
+        fig.colorbar(im, ax=ax, label='Transport Weight')
+        
+        # Set labels
+        # Extract dependency types from tuples
+        ref_dep_types = [dep_type for _, _, dep_type in ref_dependencies[:max_len]]
+        gen_dep_types = [dep_type for _, _, dep_type in gen_dependencies[:max_len]]
+        
+        # Truncate long labels for readability
+        truncate = lambda s: s[:15] + '...' if len(s) > 15 else s
+        ref_labels = [truncate(t) for t in ref_dep_types[:max_len]]
+        gen_labels = [truncate(t) for t in gen_dep_types[:max_len]]
+        
+        # Set tick labels
+        ax.set_xticks(np.arange(len(gen_labels)))
+        ax.set_yticks(np.arange(len(ref_labels)))
+        ax.set_xticklabels(gen_labels, rotation=45, ha='right')
+        ax.set_yticklabels(ref_labels)
+        
+        # Add title and labels
+        ax.set_title(f'Optimal Transport Plan (Distance: {ot_distance:.4f})')
+        ax.set_xlabel('Generated Code Dependencies')
+        ax.set_ylabel('Reference Code Dependencies')
+        
+        plt.tight_layout()
+        
+        return fig
 
 # Part 2: Test Suite Management
 # --------------------------
@@ -261,16 +376,64 @@ class TestSuite:
         self.test_cases.append(test_case)
         
     def load_from_file(self, filename: str) -> None:
-        """Load test cases from file."""
-        # In practice, implement loading logic
-        # For demonstration, we'll pass
-        pass
+        """
+        Load test cases from file.
+        
+        Args:
+            filename: Path to the test cases file (JSON format)
+        """
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            
+            self.test_cases = []
+            
+            for tc_data in data:
+                test_case = TestCase(
+                    description=tc_data['description'],
+                    reference_code=tc_data['reference_code'],
+                    reference_dependencies=tc_data.get('reference_dependencies', []),
+                    reference_coefficients=np.array(tc_data.get('reference_coefficients', [])),
+                    reference_semantic=np.array(tc_data.get('reference_semantic', None)) 
+                        if tc_data.get('reference_semantic') else None
+                )
+                self.test_cases.append(test_case)
+                
+            print(f"Loaded {len(self.test_cases)} test cases from {filename}")
+            
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Error loading test cases from {filename}: {e}")
         
     def save_to_file(self, filename: str) -> None:
-        """Save test cases to file."""
-        # In practice, implement saving logic
-        # For demonstration, we'll pass
-        pass
+        """
+        Save test cases to file.
+        
+        Args:
+            filename: Path to save the test cases (JSON format)
+        """
+        try:
+            data = []
+            
+            for tc in self.test_cases:
+                tc_data = {
+                    'description': tc.description,
+                    'reference_code': tc.reference_code,
+                    'reference_dependencies': tc.reference_dependencies,
+                    'reference_coefficients': tc.reference_coefficients.tolist(),
+                }
+                
+                if tc.reference_semantic is not None:
+                    tc_data['reference_semantic'] = tc.reference_semantic.tolist()
+                    
+                data.append(tc_data)
+            
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+            print(f"Saved {len(data)} test cases to {filename}")
+            
+        except IOError as e:
+            print(f"Error saving test cases to {filename}: {e}")
         
     def evaluate_model(self, 
                       model_fn,
@@ -583,6 +746,16 @@ def is_prime(n):
     
     # Visualize results
     suite.visualize_results(results)
+    
+    # Visualize OT plan for factorial example
+    evaluator = CodeEvaluator()
+    factorial_case = results['test_cases'][0]
+    ref_deps = test_cases[0]['reference_dependencies']
+    gen_deps = mock_dependency_extractor(factorial_case['generated_code'])[0]
+    ref_coef = test_cases[0]['reference_coefficients']
+    gen_coef = mock_coefficient_calculator(gen_deps, set())
+    
+    evaluator.visualize_ot_plan(ref_coef, gen_coef, ref_deps, gen_deps)
     
     return results
 
