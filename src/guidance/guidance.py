@@ -670,11 +670,9 @@ class StructuralGuidedGeneration:
         # Default to first template
         return templates[0]
     
-    def _simulate_llm_generation(self, 
-                                task_description: str, 
-                                template: StructuralTemplate) -> str:
+    def _simulate_llm_generation(self, task_description: str, template: StructuralTemplate) -> str:
         """
-        Simulate LLM code generation (for demonstration).
+        Simulate LLM code generation (for demonstration purposes).
         
         Args:
             task_description: Task description
@@ -683,38 +681,121 @@ class StructuralGuidedGeneration:
         Returns:
             str: Generated code
         """
-        # For demonstration, return a simplified example
-        # In practice, this would call an actual LLM API
+        # Extract keywords from task description for better simulated response
+        keywords = task_description.lower()
         
-        if "factorial" in task_description.lower():
-            return """
+        # Match task to predefined implementations
+        if "factorial" in keywords:
+            if "iterative" in keywords or "loop" in keywords:
+                return """
+def factorial(n):
+    result = 1
+    for i in range(1, n+1):
+        result *= i
+    return result
+"""
+            else:
+                return """
 def factorial(n):
     if n <= 1:
         return 1
     else:
         return n * factorial(n-1)
 """
-        elif "fibonacci" in task_description.lower():
-            return """
+        elif "fibonacci" in keywords:
+            if "iterative" in keywords or "loop" in keywords:
+                return """
 def fibonacci(n):
-    if n <= 1:
-        return n
+    if n <= 0:
+        return 0
+    if n == 1:
+        return 1
+    a, b = 0, 1
+    for _ in range(2, n+1):
+        a, b = b, a + b
+    return b
+"""
+            else:
+                return """
+def fibonacci(n):
+    if n <= 0:
+        return 0
+    elif n == 1:
+        return 1
     else:
         return fibonacci(n-1) + fibonacci(n-2)
 """
+        elif "sort" in keywords:
+            if "merge" in keywords:
+                return """
+def merge_sort(arr):
+    if len(arr) <= 1:
+        return arr
+    
+    mid = len(arr) // 2
+    left = merge_sort(arr[:mid])
+    right = merge_sort(arr[mid:])
+    
+    return merge(left, right)
+
+def merge(left, right):
+    result = []
+    i = j = 0
+    
+    while i < len(left) and j < len(right):
+        if left[i] <= right[j]:
+            result.append(left[i])
+            i += 1
         else:
-            # Default example following template structure
-            if template.code_examples:
-                return template.code_examples[0]
+            result.append(right[j])
+            j += 1
+    
+    result.extend(left[i:])
+    result.extend(right[j:])
+    return result
+"""
             else:
-                return "# No example available for this template"
+                return """
+def quick_sort(arr):
+    if len(arr) <= 1:
+        return arr
+    
+    pivot = arr[len(arr) // 2]
+    left = [x for x in arr if x < pivot]
+    middle = [x for x in arr if x == pivot]
+    right = [x for x in arr if x > pivot]
+    
+    return quick_sort(left) + middle + quick_sort(right)
+"""
+        # Default to returning an example from the template if available
+        elif template.code_examples:
+            # Adjust variable names to make it seem like a new generation
+            code = template.code_examples[0]
+            # Simple name substitution to make it look different
+            replacements = {'factorial': 'compute', 'fibonacci': 'sequence', 
+                           'result': 'output', 'n': 'num', 'i': 'index'}
+            for old, new in replacements.items():
+                code = code.replace(old, new)
+            return code
+        else:
+            # Generic function template as fallback
+            return """
+def solution(input_data):
+    # Default implementation
+    result = process_data(input_data)
+    return result
+
+def process_data(data):
+    # Placeholder processing
+    return data
+"""
     
     def _simulate_llm_refinement(self, 
                                 previous_code: str, 
                                 feedback: str, 
                                 template: StructuralTemplate) -> str:
         """
-        Simulate LLM code refinement (for demonstration).
+        Simulate LLM code refinement (for demonstration purposes).
         
         Args:
             previous_code: Previously generated code
@@ -724,19 +805,41 @@ def fibonacci(n):
         Returns:
             str: Refined code
         """
-        # For demonstration, simply return a template example
-        # In practice, this would call an actual LLM API
-        if template.code_examples:
-            # Make small modifications to look like refinement
-            example = template.code_examples[0]
+        # Parse the feedback to identify missing patterns
+        missing_patterns = []
+        if "Missing structural elements:" in feedback:
+            missing_section = feedback.split("Missing structural elements:")[1]
+            if "Extra structural elements:" in missing_section:
+                missing_section = missing_section.split("Extra structural elements:")[0]
             
-            # Add a comment to make it look refined
-            refined = "# Refined version to better match structural template\n"
-            refined += example
-            
-            return refined
-        else:
-            return previous_code
+            # Extract missing patterns from feedback
+            for line in missing_section.strip().split("\n"):
+                if line.startswith("-"):
+                    pattern = line.strip("- ").split(" (")[0]
+                    missing_patterns.append(pattern)
+        
+        # Simple refinement based on missing patterns
+        refined_code = previous_code
+        
+        # Check for specific missing patterns and address them
+        if any("FunctionDef→If" in pattern for pattern in missing_patterns):
+            # Add conditional logic if missing
+            if "if " not in refined_code:
+                refined_code = refined_code.replace("return ", "if input_value > 0:\n        return ")
+                refined_code += "\n    else:\n        return 0"
+                
+        elif any("FunctionDef→For" in pattern for pattern in missing_patterns):
+            # Add loop if missing
+            if "for " not in refined_code:
+                refined_code = refined_code.replace("return ", "result = 0\n    for i in range(10):\n        result += i\n    return ")
+        
+        # If can't make specific refinements, use a template example
+        if refined_code == previous_code and template.code_examples:
+            # Mark as refined version
+            refined_code = "# Refined version to better match structural template\n"
+            refined_code += template.code_examples[0]
+        
+        return refined_code
 
 # Part 5: Demonstration
 # ------------------
